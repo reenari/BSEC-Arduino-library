@@ -1,4 +1,4 @@
-/**
+
  * Copyright (C) 2017 - 2018 Bosch Sensortec GmbH
  *
  * Redistribution and use in source and binary forms, with or without
@@ -45,6 +45,7 @@
  *
  */
 
+#include "lmic/oslmic.h" // XXX get rid of this dependency
 #include "bsec.h"
 
 TwoWire* Bsec::wireObj = NULL;
@@ -62,6 +63,7 @@ Bsec::Bsec()
 	version.minor_bugfix = 0;
 	millisOverflowCounter = 0;
 	lastTime = 0;
+	lastUs = 0;
 	bme680Status = BME680_OK;
 	outputTimestamp = 0;
 	_tempOffset = 0.0f;
@@ -142,6 +144,7 @@ void Bsec::beginCommon(void)
  */
 void Bsec::updateSubscription(bsec_virtual_sensor_t sensorList[], uint8_t nSensors, float sampleRate)
 {
+Serial.println("updSubs");
 	bsec_sensor_configuration_t virtualSensors[BSEC_NUMBER_OUTPUTS],
 	        sensorSettings[BSEC_MAX_PHYSICAL_SENSOR];
 	uint8_t nVirtualSensors = 0, nSensorSettings = BSEC_MAX_PHYSICAL_SENSOR;
@@ -153,50 +156,75 @@ void Bsec::updateSubscription(bsec_virtual_sensor_t sensorList[], uint8_t nSenso
 	}
 
 	status = bsec_update_subscription(virtualSensors, nVirtualSensors, sensorSettings, &nSensorSettings);
+Serial.println(".");
 	return;
 }
 
+// XXX refactor this callback mess
+osjob_t readDataJob;
+bool readPending = false;
+int64_t callTimeNs=0;
+bsec_bme_settings_t bme680Settings;
+/*
+void Bsec::readData(osjob_t job) {
+	readProcessData(callTimeNs, bme680Settings);
+	process_bme680();
+	readPending = false;
+}
+*/
 /**
  * @brief Callback from the user to trigger reading of data from the BME680, process and store outputs
  */
-bool Bsec::run(void)
+bool  Bsec::run(unsigned long int *ct)
 {
+	if(readPending)
+		return true;
 	bool newData = false;
 	/* Check if the time has arrived to call do_steps() */
 	int64_t callTimeMs = getTimeMs();
+	*ct = callTimeMs;
 	
 	if (callTimeMs >= nextCall) {
-	
-		bsec_bme_settings_t bme680Settings;
+	Serial.println("run");
+	//	bsec_bme_settings_t bme680Settings;
 
-		int64_t callTimeNs = callTimeMs * INT64_C(1000000);
+		/*int64_t*/  callTimeNs = callTimeMs * INT64_C(1000000);
 
 		status = bsec_sensor_control(callTimeNs, &bme680Settings);
-		if (status < BSEC_OK)
+		if (status < BSEC_OK) {
 			return false;
-
+Serial.println("f1");
+}
 		nextCall = bme680Settings.next_call / INT64_C(1000000); // Convert from ns to ms
 
 		bme680Status = setBme680Config(bme680Settings);
 		if (bme680Status != BME680_OK) {
 			return false;
+Serial.println("f2");
 		}
 
 		bme680Status = bme680_set_sensor_mode(&_bme680);
 		if (bme680Status != BME680_OK) {
 			return false;
+Serial.println("f3");
 		}
 
 		/* Wait for measurement to complete */
 		uint16_t meas_dur = 0;
 
 		bme680_get_profile_dur(&meas_dur, &_bme680);
+// callback can not be c++
+//readPending = true;
+//os_setTimedCallback(&readDatajob, os_getTime() + msec2osticks(meas_dur), readData);
+
 		delay_ms(meas_dur);
 
 		newData = readProcessData(callTimeNs, bme680Settings);	
+Serial.println("." + String((long unsigned int)nextCall)); 
+		return true;
 	}
 	
-	return newData;
+	return false;
 }
 
 /**
@@ -226,7 +254,7 @@ void Bsec::setConfig(const uint8_t *state)
 {
 	uint8_t workBuffer[BSEC_MAX_PROPERTY_BLOB_SIZE];
 
-	status = bsec_set_configuration(state, BSEC_MAX_PROPERTY_BLOB_SIZE, workBuffer, BSEC_MAX_PROPERTY_BLOB_SIZE);
+	status = bsec_set_configuration(state, BSEC_MAX_PROPERTY_BLOB_SIZE, workBuffer, sizeof(workBuffer));
 }
 
 /* Private functions */
@@ -299,9 +327,21 @@ bool Bsec::readProcessData(int64_t currTimeNs, bsec_bme_settings_t bme680Setting
 
 			for (uint8_t i = 0; i < nOutputs; i++) {
 				switch (_outputs[i].sensor_id) {
-					case BSEC_OUTPUT_IAQ_ESTIMATE:
+					case BSEC_OUTPUT_IAQ:
 						iaqEstimate = _outputs[i].signal;
 						iaqAccuracy = _outputs[i].accuracy;
+						break;
+					case BSEC_OUTPUT_STATIC_IAQ:
+						staticIaq = _outputs[i].signal;
+						staticIaqAccuracy = _outputs[i].accuracy;
+						break;
+					case BSEC_OUTPUT_CO2_EQUIVALENT:
+						co2Equivalent = _outputs[i].signal;
+						co2Accuracy = _outputs[i].accuracy;
+						break;
+					case BSEC_OUTPUT_BREATH_VOC_EQUIVALENT:
+						breathVocEquivalent = _outputs[i].signal;
+						breathVocAccuracy = _outputs[i].accuracy;
 						break;
 					case BSEC_OUTPUT_RAW_TEMPERATURE:
 						rawTemperature = _outputs[i].signal;
@@ -326,6 +366,14 @@ bool Bsec::readProcessData(int64_t currTimeNs, bsec_bme_settings_t bme680Setting
 						break;
 					case BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_HUMIDITY:
 						humidity = _outputs[i].signal;
+						break;
+					case BSEC_OUTPUT_COMPENSATED_GAS:
+						compGasValue = _outputs[i].signal;
+						compGasAccuracy = _outputs[i].accuracy;
+						break;
+					case BSEC_OUTPUT_GAS_PERCENTAGE:
+						gasPercentage = _outputs[i].signal;
+						gasPercentageAcccuracy = _outputs[i].accuracy;
 						break;
 					default:
 						break;
@@ -369,21 +417,53 @@ void Bsec::zeroOutputs(void)
 	runInStatus = 0.0f;
 	iaqEstimate = 0.0f;
 	iaqAccuracy = 0;
+	staticIaq = 0.0f;
+	staticIaqAccuracy = 0;
+	co2Equivalent = 0.0f;
+	co2Accuracy = 0;
+	breathVocEquivalent = 0.0f;
+	breathVocAccuracy = 0;
+	compGasValue = 0.0f;
+	compGasAccuracy = 0;
+	gasPercentage = 0.0f;
+	gasPercentageAcccuracy = 0;
 }
 
 /**
  * @brief Function to calculate an int64_t timestamp in milliseconds
+02:56:36.277 -> overflow
+04:08:05.238 -> overflow
+05:19:28.263 -> overflow
+06:31:18.767 -> overflow
+07:42:44.767 -> overflow
+08:54:12.188 -> overflow
+
  */
 int64_t Bsec::getTimeMs(void)
 {
-	int64_t timeMs = millis();
-
+//	int64_t timeMs = millis();
+// boards millis() is based on 32b micro second timer
+// so it wraps around in about 72 minutes
+// library expects timeMs to be 64bit and wrap around accoringly
+// so lets count the ms here
+// note the code below loses 0-999 uS per call, was good enought for now
+// should refactor this to be getTimeNs as the library seems to use nS anyway
+	int32_t timeUs = micros();
+	int32_t elapsed = timeUs - lastUs;
+	lastUs = timeUs;
+	lastTime += (elapsed /1000);
+	
+	return lastTime;
+/* orig. code
 	if (lastTime > timeMs) { // An overflow occured
 		lastTime = timeMs;
 		millisOverflowCounter++;
+Serial.println("overflow");
+Serial.println(String(millisOverflowCounter));
 	}
-
+	lastTime = timeMs;
 	return timeMs + (millisOverflowCounter * 0xFFFFFFFF);
+*/
 }
 
 /**
@@ -399,6 +479,33 @@ void Bsec::delay_ms(uint32_t period)
 /**
  @brief Callback function for reading registers over I2C
  */
+int8_t Bsec::i2cRead(uint8_t dev_id, uint8_t reg_addr, uint8_t *reg_data, uint16_t len) {
+#ifdef DEBUG_i2c
+  Serial.print("\tI2C $"); Serial.print(reg_addr, HEX); Serial.print(" => ");
+#endif
+
+  Bsec::wireObj->beginTransmission((uint8_t)dev_id);
+  Bsec::wireObj->write((uint8_t)reg_addr);
+  Bsec::wireObj->endTransmission();
+  if (len != Bsec::wireObj->requestFrom((uint8_t)dev_id, (byte)len)) {
+#ifdef DEBUG_i2c
+    Serial.print("Failed to read "); Serial.print(len); Serial.print(" bytes from "); Serial.println(dev_id, HEX);
+#endif
+    return 1;
+  }
+  while (len--) {
+    *reg_data = (uint8_t)Bsec::wireObj->read();
+#ifdef DEBUG_i2c
+    Serial.print("0x"); Serial.print(*reg_data, HEX); Serial.print(", ");
+#endif
+    reg_data++;
+  }
+#ifdef DEBUG_i2c
+  Serial.println("");
+#endif
+  return 0;
+}
+/*
 int8_t Bsec::i2cRead(uint8_t devId, uint8_t regAddr, uint8_t *regData, uint16_t length)
 {
 	uint16_t i;
@@ -416,10 +523,30 @@ int8_t Bsec::i2cRead(uint8_t devId, uint8_t regAddr, uint8_t *regData, uint16_t 
 	}
 	return rslt;
 }
-
+*/
 /**
  * @brief Callback function for writing registers over I2C
  */
+int8_t Bsec::i2cWrite(uint8_t dev_id, uint8_t reg_addr, uint8_t *reg_data, uint16_t len) {
+#ifdef DEBUG_i2c
+  Serial.print("\tI2C $"); Serial.print(reg_addr, HEX); Serial.print(" <= ");
+#endif
+  Bsec::wireObj->beginTransmission((uint8_t)dev_id);
+  Bsec::wireObj->write((uint8_t)reg_addr);
+  while (len--) {
+    Bsec::wireObj->write(*reg_data);
+#ifdef DEBUG_i2c
+    Serial.print("0x"); Serial.print(*reg_data, HEX); Serial.print(", ");
+#endif
+    reg_data++;
+  }
+  Bsec::wireObj->endTransmission();
+#ifdef DEBUG_i2c
+  Serial.println("");
+#endif
+  return 0;
+}
+/*
 int8_t Bsec::i2cWrite(uint8_t devId, uint8_t regAddr, uint8_t *regData, uint16_t length)
 {
 	uint16_t i;
@@ -437,7 +564,7 @@ int8_t Bsec::i2cWrite(uint8_t devId, uint8_t regAddr, uint8_t *regData, uint16_t
 
 	return rslt;
 }
-
+*/
 /**
  * @brief Callback function for reading and writing registers over SPI
  */

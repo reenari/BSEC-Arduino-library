@@ -38,7 +38,7 @@ void setup(void)
     BSEC_OUTPUT_RAW_PRESSURE,
     BSEC_OUTPUT_RAW_HUMIDITY,
     BSEC_OUTPUT_RAW_GAS,
-    BSEC_OUTPUT_IAQ_ESTIMATE,
+    BSEC_OUTPUT_IAQ,
     BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_TEMPERATURE,
     BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_HUMIDITY,
   };
@@ -54,8 +54,9 @@ void setup(void)
 // Function that is looped forever
 void loop(void)
 {
+  unsigned long time_trigger = millis();
   if (iaqSensor.run()) { // If new data is available
-    output = String(millis());
+    output = String(time_trigger);
     output += ", " + String(iaqSensor.rawTemperature);
     output += ", " + String(iaqSensor.pressure);
     output += ", " + String(iaqSensor.rawHumidity);
@@ -136,7 +137,7 @@ void updateState(void)
 {
   bool update = false;
   if (stateUpdateCounter == 0) {
-    /* First state update when IAQ accuracy is >= 1 */
+    /* First state update when IAQ accuracy is >= 3 */
     if (iaqSensor.iaqAccuracy >= 3) {
       update = true;
       stateUpdateCounter++;

@@ -65,8 +65,9 @@ public:
 	int64_t nextCall;			// Stores the time when the algorithm has to be called next in ms
 	int8_t bme680Status;		// Placeholder for the BME680 driver's error codes
 	bsec_library_return_t status;
-	float iaqEstimate, rawTemperature, pressure, rawHumidity, gasResistance, stabStatus, runInStatus, temperature, humidity;
-	uint8_t iaqAccuracy;
+	float iaqEstimate, rawTemperature, pressure, rawHumidity, gasResistance, stabStatus, runInStatus, temperature, humidity,
+	      staticIaq, co2Equivalent, breathVocEquivalent, compGasValue, gasPercentage;
+	uint8_t iaqAccuracy, staticIaqAccuracy, co2Accuracy, breathVocAccuracy, compGasAccuracy, gasPercentageAcccuracy;
 	int64_t outputTimestamp;	// Timestamp in ms of the output
 	static TwoWire *wireObj;
 	static SPIClass *spiObj;
@@ -113,7 +114,8 @@ public:
 	 * @brief Callback from the user to trigger reading of data from the BME680, process and store outputs
 	 * @return true if there are new outputs. false otherwise
 	 */
-	bool run(void);
+	//bool run(void);
+bool run(unsigned long int *ct);
 
 	/**
 	 * @brief Function to get the state of the algorithm to save to non-volatile memory
@@ -192,7 +194,8 @@ private:
 	// Global variables to help create a millisecond timestamp that doesn't overflow every 51 days.
 	// If it overflows, it will have a negative value. Something that should never happen.
 	uint32_t millisOverflowCounter;
-	uint32_t lastTime;
+	uint64_t lastTime;
+	uint32_t lastUs;
 
 	/* Private APIs */
 	/**
